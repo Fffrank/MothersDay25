@@ -1,0 +1,1 @@
+This is a silly project to search google flights via the fast-flights API for all flights between 3 cities and then find the cheapest option with a minimum connection time.  It includes all the airlines and returns pricing and recommended routing.  You can define minimum time in each city and earliest departure/latest arrival times. 
