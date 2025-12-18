@@ -24,12 +24,14 @@ def get_flights_data(origin, destination, date, max_retries=5):
             ]
 
             # Call the get_flights function with the required parameters
+            # Note: fast-flights v2.2 supports "common", "fallback", "force-fallback"
+            # "local" mode is only available in v3.0+ - v2.2 handles HTTP requests internally
             result: Result = get_flights(
                 flight_data=flight_data,
                 trip="one-way",
                 seat="economy",
                 passengers=Passengers(adults=1, children=0, infants_in_seat=0, infants_on_lap=0),
-                fetch_mode="fallback",
+                fetch_mode="common",
             )
 
             # Extract flights from the result
@@ -38,11 +40,17 @@ def get_flights_data(origin, destination, date, max_retries=5):
             return flights
         except Exception as e:
             log_progress(f"Flight Search Failed for {origin} → {destination}: {str(e)}", "WARNING")
-            if "no token provided" in str(e).lower():
+            error_str = str(e).lower()
+            # Handle different types of errors
+            if "no token provided" in error_str or "timeout" in error_str:
                 attempt += 1
-                wait_time = random.randint(1, 5)  # Random wait time between 1 and 5 seconds
-                log_progress(f"Retrying ({attempt}/{max_retries}) in {wait_time} seconds...")
-                time.sleep(wait_time)  # Wait before retrying
+                if attempt < max_retries:
+                    wait_time = random.randint(2, 8)  # Random wait time between 2 and 8 seconds
+                    log_progress(f"Retrying ({attempt}/{max_retries}) in {wait_time} seconds...")
+                    time.sleep(wait_time)  # Wait before retrying
+                else:
+                    log_progress(f"Max retries reached for {origin} → {destination}. Returning no flights.", "ERROR")
+                    return []
             else:
                 # For other exceptions, do not retry and return an empty list
                 return []
@@ -51,20 +59,52 @@ def get_flights_data(origin, destination, date, max_retries=5):
     return []
 
 
-def parse_flight_time(time_str):
-    """Parse the flight time string into a datetime object."""
+def parse_flight_time(time_str, travel_date_str):
+    """Parse the flight time string into a datetime object.
+    
+    Args:
+        time_str: Time string from fast_flights (e.g., "2:30 PM on Mon, May 10" or ISO format)
+        travel_date_str: Travel date string in YYYY-MM-DD format to extract the year
+    """
     try:
         # Check if the time string is in ISO 8601 format
         if "T" in time_str:
             # Parse ISO 8601 format
             return datetime.datetime.fromisoformat(time_str)
         else:
-            # Parse the human-readable format
-            parsed_time = datetime.datetime.strptime(time_str, "%I:%M %p on %a, %b %d")
-            # Add the year (since it's not included in the string)
-            parsed_time = parsed_time.replace(year=2025)
-            return parsed_time
-    except ValueError as e:
+            # Parse the human-readable format (e.g., "2:30 PM on Mon, May 10")
+            # Try different date formats that Google Flights might use
+            year = datetime.datetime.strptime(travel_date_str, "%Y-%m-%d").year
+            
+            # Try format with "on" (e.g., "2:30 PM on Mon, May 10")
+            try:
+                parsed_time = datetime.datetime.strptime(time_str, "%I:%M %p on %a, %b %d")
+                parsed_time = parsed_time.replace(year=year)
+                return parsed_time
+            except ValueError:
+                pass
+            
+            # Try format without "on" (e.g., "2:30 PM Mon, May 10")
+            try:
+                parsed_time = datetime.datetime.strptime(time_str, "%I:%M %p %a, %b %d")
+                parsed_time = parsed_time.replace(year=year)
+                return parsed_time
+            except ValueError:
+                pass
+            
+            # Try just time (e.g., "2:30 PM") - use travel date
+            try:
+                parsed_time = datetime.datetime.strptime(time_str, "%I:%M %p")
+                travel_date = datetime.datetime.strptime(travel_date_str, "%Y-%m-%d")
+                parsed_time = parsed_time.replace(year=travel_date.year, month=travel_date.month, day=travel_date.day)
+                return parsed_time
+            except ValueError:
+                pass
+            
+            # If all parsing attempts fail, log and return None
+            log_progress(f"Could not parse time format: {time_str}", "WARNING")
+            return None
+    except Exception as e:
         log_progress(f"Error parsing time: {time_str} - {str(e)}", "ERROR")
         return None
 
@@ -134,12 +174,12 @@ def build_itineraries(df, airports, min_city_time_minutes):
 def main():
     # Define parameters
     airports = ["NYC", "CHI", "BNA", "AUS"]  # Replace with your 4 airports
-    travel_date = "2025-05-11"  # Example start date
+    travel_date = "2026-05-10"  # Example start date
     min_city_time_minutes = 90  # Minimum time in each city
 
     # New constraints
-    earliest_departure = "2025-05-11T10:50:00"  # Earliest departure time for the first flight
-    latest_arrival = "2025-05-12T00:45:00"  # Latest arrival time for the last flight
+    earliest_departure = "2026-05-10T10:50:00"  # Earliest departure time for the first flight
+    latest_arrival = "2026-05-11T00:45:00"  # Latest arrival time for the last flight
 
     # Progress tracking for flight search
     log_progress("Starting Comprehensive Flight Search")
@@ -166,11 +206,18 @@ def main():
                     # Extract flight details
                     price_str = flight.price  # Assuming flight.price is a string like '$54'
                     price = float(price_str.replace('$', '').strip())  # Remove '$' and convert to float
-                    departure = parse_flight_time(flight.departure)  # Keep original datetime
-                    arrival = parse_flight_time(flight.arrival)  # Keep original datetime
+                    
+                    # Debug: log first flight's time format to understand the structure
+                    if len(itinerary) == 0:
+                        log_progress(f"Sample flight time formats - departure: '{flight.departure}', arrival: '{flight.arrival}'")
+                    
+                    departure = parse_flight_time(flight.departure, travel_date)  # Parse with travel date for year
+                    arrival = parse_flight_time(flight.arrival, travel_date)  # Parse with travel date for year
 
                     # Skip flights with invalid times
                     if not departure or not arrival:
+                        if len(itinerary) == 0:  # Only log for first flight to avoid spam
+                            log_progress(f"Skipping flight due to parsing failure - departure: {flight.departure}, arrival: {flight.arrival}", "WARNING")
                         continue
 
                     itinerary.append({
@@ -195,6 +242,11 @@ def main():
 
     # Convert to DataFrame
     log_progress(f"Total Flights Found: {len(itinerary)}")
+    
+    if not itinerary:
+        log_progress("No flights found. Cannot build itineraries.", "WARNING")
+        return
+    
     df = pd.DataFrame(itinerary)
 
     # Check the DataFrame columns
@@ -202,11 +254,24 @@ def main():
 
     # Apply earliest departure and latest arrival filters
     log_progress("Applying Earliest Departure and Latest Arrival Constraints")
-    if earliest_departure:
-        df = df[df["departure"] >= pd.to_datetime(earliest_departure)]  # Convert to datetime for comparison
-    if latest_arrival:
-        df = df[df["arrival"] <= pd.to_datetime(latest_arrival)]  # Convert to datetime for comparison
-    log_progress(f"Flights After Filtering: {len(df)}")
+    if not df.empty:
+        earliest_dt = pd.to_datetime(earliest_departure) if earliest_departure else None
+        latest_dt = pd.to_datetime(latest_arrival) if latest_arrival else None
+        
+        log_progress(f"Filtering with earliest_departure: {earliest_dt}, latest_arrival: {latest_dt}")
+        
+        if earliest_departure:
+            before_count = len(df)
+            df = df[df["departure"] >= earliest_dt]
+            log_progress(f"After earliest_departure filter: {len(df)} flights (removed {before_count - len(df)})")
+            if len(df) > 0:
+                log_progress(f"Sample departure times after filter: {df['departure'].head(3).tolist()}")
+        
+        if latest_arrival and not df.empty:
+            before_count = len(df)
+            df = df[df["arrival"] <= latest_dt]
+            log_progress(f"After latest_arrival filter: {len(df)} flights (removed {before_count - len(df)})")
+    log_progress(f"Final flights after all filtering: {len(df)}")
 
     # Build itinerary
     log_progress("Constructing Optimal Flight Itinerary")
@@ -289,8 +354,9 @@ def get_cached_flights(origin, destination, date, max_cache_age_minutes=1):
     return flights
 
 # Performance and timing
-start_time = time.time()
-main()
-end_time = time.time()
-
-print(f"\nTotal Execution Time: {end_time - start_time:.2f} seconds")
+if __name__ == "__main__":
+    start_time = time.time()
+    main()
+    end_time = time.time()
+    
+    print(f"\nTotal Execution Time: {end_time - start_time:.2f} seconds")
