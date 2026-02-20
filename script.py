@@ -111,20 +111,25 @@ def parse_flight_time(time_str, travel_date_str):
         log_progress(f"Error parsing time: {time_str} - {str(e)}", "ERROR")
         return None
 
-def is_valid_itinerary(flight_combination, airports, min_city_time_minutes):
+def is_valid_itinerary(flight_combination, airports, min_city_time_minutes, earliest_departure=None, latest_arrival=None):
     """
     Validate if a given flight combination is a valid itinerary.
+    earliest_departure applies only to the first flight's departure.
+    latest_arrival applies only to the last flight's arrival.
     """
+    if earliest_departure and flight_combination[0]['departure'] < earliest_departure:
+        return False
+    if latest_arrival and flight_combination[-1]['arrival'] > latest_arrival:
+        return False
+
     for i in range(len(flight_combination) - 1):
         current_flight = flight_combination[i]
         next_flight = flight_combination[i + 1]
 
-        # Ensure times are pandas.Timestamp objects
         current_arrival = current_flight['arrival']
         next_departure = next_flight['departure']
 
-        # Check if the layover time is sufficient
-        layover_time = (next_departure - current_arrival).total_seconds() / 60  # Convert to minutes
+        layover_time = (next_departure - current_arrival).total_seconds() / 60
         if layover_time < min_city_time_minutes:
             return False
 
@@ -133,9 +138,9 @@ def is_valid_itinerary(flight_combination, airports, min_city_time_minutes):
 
 from itertools import permutations, product
 
-def build_itineraries(df, airports, min_city_time_minutes):
+def build_itineraries(df, airports, min_city_time_minutes, earliest_departure=None, latest_arrival=None):
     itineraries = []
-    unique_itineraries = set()  # Set to track unique itineraries
+    unique_itineraries = set()
 
     for perm in permutations(airports):
         current_itinerary = []
@@ -154,16 +159,13 @@ def build_itineraries(df, airports, min_city_time_minutes):
 
         if valid:
             for flight_combination in product(*current_itinerary):
-                # Ensure all prices are numeric
                 total_price = sum(float(flight['price']) for flight in flight_combination)
 
-                # Create a unique identifier for the itinerary
                 itinerary_id = tuple((flight['airline'], flight['origin'], flight['destination'], flight['departure'], flight['arrival']) for flight in flight_combination)
 
-                # Check if this itinerary is already in the set
                 if itinerary_id not in unique_itineraries:
-                    unique_itineraries.add(itinerary_id)  # Add to the set
-                    if is_valid_itinerary(flight_combination, airports, min_city_time_minutes):
+                    unique_itineraries.add(itinerary_id)
+                    if is_valid_itinerary(flight_combination, airports, min_city_time_minutes, earliest_departure, latest_arrival):
                         itineraries.append({
                             "flights": flight_combination,
                             "total_price": total_price
@@ -299,26 +301,10 @@ def main():
     
     df = pd.DataFrame(itinerary)
 
-    # Apply earliest departure and latest arrival filters
-    log_progress("Applying Earliest Departure and Latest Arrival Constraints")
-    if not df.empty:
-        earliest_dt = pd.to_datetime(earliest_departure) if earliest_departure else None
-        latest_dt = pd.to_datetime(latest_arrival) if latest_arrival else None
-        
-        log_progress(f"Filtering with earliest_departure: {earliest_dt}, latest_arrival: {latest_dt}")
-        
-        if earliest_departure:
-            before_count = len(df)
-            df = df[df["departure"] >= earliest_dt]
-            log_progress(f"After earliest_departure filter: {len(df)} flights (removed {before_count - len(df)})")
-            if len(df) > 0:
-                log_progress(f"Sample departure times after filter: {df['departure'].head(3).tolist()}")
-        
-        if latest_arrival and not df.empty:
-            before_count = len(df)
-            df = df[df["arrival"] <= latest_dt]
-            log_progress(f"After latest_arrival filter: {len(df)} flights (removed {before_count - len(df)})")
-    log_progress(f"Final flights after all filtering: {len(df)}")
+    earliest_dt = pd.to_datetime(earliest_departure) if earliest_departure else None
+    latest_dt = pd.to_datetime(latest_arrival) if latest_arrival else None
+    log_progress(f"Itinerary constraints: first departure >= {earliest_dt}, last arrival <= {latest_dt}")
+    log_progress(f"Total flights available for itinerary search: {len(df)}")
 
     # Log per-route coverage so we can diagnose missing legs
     empty_routes = []
@@ -333,7 +319,7 @@ def main():
 
     # Build itinerary
     log_progress("Constructing Optimal Flight Itinerary")
-    final_itineraries = build_itineraries(df, airports, min_city_time_minutes)
+    final_itineraries = build_itineraries(df, airports, min_city_time_minutes, earliest_dt, latest_dt)
 
     # Display results
     log_progress("Final Itinerary Construction Complete")
