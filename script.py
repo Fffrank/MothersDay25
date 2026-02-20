@@ -43,7 +43,8 @@ def get_flights_data(origin, destination, date, max_retries=5):
             log_progress(f"Found {len(flights)} flights for {origin} → {destination}")
             return flights
         except Exception as e:
-            log_progress(f"Flight Search Failed for {origin} → {destination}: {str(e)}", "WARNING")
+            error_summary = str(e).split('\n')[0][:150]
+            log_progress(f"Flight Search Failed for {origin} → {destination}: {error_summary}", "WARNING")
             error_str = str(e).lower()
             # Handle different types of errors
             if "no token provided" in error_str or "timeout" in error_str or "no flights found" in error_str:
@@ -82,16 +83,14 @@ def parse_flight_time(time_str, travel_date_str):
             
             # Try format with "on" (e.g., "2:30 PM on Mon, May 10")
             try:
-                parsed_time = datetime.datetime.strptime(time_str, "%I:%M %p on %a, %b %d")
-                parsed_time = parsed_time.replace(year=year)
+                parsed_time = datetime.datetime.strptime(f"{time_str} {year}", "%I:%M %p on %a, %b %d %Y")
                 return parsed_time
             except ValueError:
                 pass
-            
+
             # Try format without "on" (e.g., "2:30 PM Mon, May 10")
             try:
-                parsed_time = datetime.datetime.strptime(time_str, "%I:%M %p %a, %b %d")
-                parsed_time = parsed_time.replace(year=year)
+                parsed_time = datetime.datetime.strptime(f"{time_str} {year}", "%I:%M %p %a, %b %d %Y")
                 return parsed_time
             except ValueError:
                 pass
@@ -300,9 +299,6 @@ def main():
     
     df = pd.DataFrame(itinerary)
 
-    # Check the DataFrame columns
-    print("DataFrame Columns:", df.columns)  # Inspect the DataFrame columns
-
     # Apply earliest departure and latest arrival filters
     log_progress("Applying Earliest Departure and Latest Arrival Constraints")
     if not df.empty:
@@ -323,6 +319,17 @@ def main():
             df = df[df["arrival"] <= latest_dt]
             log_progress(f"After latest_arrival filter: {len(df)} flights (removed {before_count - len(df)})")
     log_progress(f"Final flights after all filtering: {len(df)}")
+
+    # Log per-route coverage so we can diagnose missing legs
+    empty_routes = []
+    for orig in airports:
+        for dest in airports:
+            if orig != dest:
+                count = len(df[(df['origin'] == orig) & (df['destination'] == dest)])
+                if count == 0:
+                    empty_routes.append(f"{orig} → {dest}")
+    if empty_routes:
+        log_progress(f"Routes with NO flights after filtering (will block itineraries): {', '.join(empty_routes)}", "WARNING")
 
     # Build itinerary
     log_progress("Constructing Optimal Flight Itinerary")
@@ -366,6 +373,9 @@ def main():
                 print(f"{row['airline']:<20}{row['origin']:<10}{row['destination']:<15}{departure_human_readable:<30}{arrival_human_readable:<30}${row['price']:.2f}")
     else:
         log_progress("No valid itineraries found.", "WARNING")
+        log_progress(f"Tip: {len(airports)} cities × {min_city_time_minutes}min min stops in a "
+                     f"{(pd.to_datetime(latest_arrival) - pd.to_datetime(earliest_departure)).total_seconds()/3600:.1f}h window "
+                     f"may be too tight. Try fewer cities or reduce min_city_time_minutes.", "WARNING")
 
 
 def generate_cache_key(origin, destination, date):
