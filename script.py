@@ -35,7 +35,7 @@ def get_flights_data(origin, destination, date, max_retries=5):
                     trip="one-way",
                     seat="economy",
                     passengers=Passengers(adults=1, children=0, infants_in_seat=0, infants_on_lap=0),
-                    fetch_mode="common",
+                    fetch_mode="fallback",
                 )
 
             # Extract flights from the result
