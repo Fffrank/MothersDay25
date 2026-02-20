@@ -23,7 +23,7 @@ def get_flights_data(origin, destination, date, max_retries=5):
         try:
             # Create a FlightData object
             flight_data = [
-                FlightData(date=date, from_airport=origin, to_airport=destination)
+                FlightData(date=date, from_airport=origin, to_airport=destination, max_stops=0)
             ]
 
             # Call the get_flights function with the required parameters
@@ -217,20 +217,63 @@ def prompt_airports():
             print("Please enter valid numbers.")
 
 
-def main():
-    # Define parameters
-    airports = prompt_airports()
-    travel_date = "2026-05-10"  # Example start date
-    min_city_time_minutes = 90  # Minimum time in each city
+def prompt_datetime(label, default_str):
+    """Prompt for a datetime, showing the default. Returns a datetime string in ISO format."""
+    while True:
+        raw = input(f"{label} [{default_str}]: ").strip()
+        if not raw:
+            return default_str
+        try:
+            datetime.datetime.fromisoformat(raw)
+            return raw
+        except ValueError:
+            print("  Invalid format. Use YYYY-MM-DDTHH:MM:SS (e.g. 2026-05-10T08:00:00)")
 
-    # New constraints
-    earliest_departure = "2026-05-10T10:50:00"  # Earliest departure time for the first flight
-    latest_arrival = "2026-05-11T00:45:00"  # Latest arrival time for the last flight
+
+def prompt_int(label, default, min_val=1):
+    """Prompt for a positive integer, showing the default."""
+    while True:
+        raw = input(f"{label} [{default}]: ").strip()
+        if not raw:
+            return default
+        try:
+            val = int(raw)
+            if val >= min_val:
+                return val
+            print(f"  Please enter a value >= {min_val}.")
+        except ValueError:
+            print("  Please enter a valid integer.")
+
+
+def prompt_constraints():
+    print("\n-- Flight Constraints --")
+    print("Press Enter to accept defaults.\n")
+    earliest_departure = prompt_datetime(
+        "Earliest departure time for first flight (YYYY-MM-DDTHH:MM:SS)",
+        "2026-05-10T10:50:00"
+    )
+    latest_arrival = prompt_datetime(
+        "Latest arrival time for last flight   (YYYY-MM-DDTHH:MM:SS)",
+        "2026-05-11T00:45:00"
+    )
+    min_city_time_minutes = prompt_int(
+        "Minimum layover/stopover time in minutes",
+        90, min_val=0
+    )
+    return earliest_departure, latest_arrival, min_city_time_minutes
+
+
+def main():
+    airports = prompt_airports()
+    earliest_departure, latest_arrival, min_city_time_minutes = prompt_constraints()
+    travel_date = earliest_departure[:10]  # derive date from earliest departure
 
     # Progress tracking for flight search
     log_progress("Starting Comprehensive Flight Search")
+    log_progress(f"Travel date: {travel_date}, window: {earliest_departure} → {latest_arrival}, min stopover: {min_city_time_minutes}m")
     itinerary = []
-    zero_flight_routes = []
+    zero_flight_routes = []   # API returned nothing
+    no_nonstop_routes = []    # API returned results but all had stops
 
     # Use tqdm for a progress bar
     airport_combinations = [(i, j) for i in airports for j in airports if i != j]
@@ -247,58 +290,65 @@ def main():
                     zero_flight_routes.append((origin, destination))
                     break  # Skip to the next pair if no flights are found
 
-                # Filter for non-stop flights
-                non_stop_flights = [flight for flight in flights if flight.stops == 0]  # Keep only non-stop flights
+                # Filter for non-stop flights (stops may be "Unknown" if the text parser failed)
+                non_stop_flights = [flight for flight in flights if flight.stops == 0 or flight.stops == "Unknown"]
 
+                if not non_stop_flights:
+                    log_progress(f"No non-stop flights for {origin} → {destination} ({len(flights)} with stops available)", "WARNING")
+                    no_nonstop_routes.append((origin, destination, len(flights)))
+                    success = True
+                    break
+
+                added = 0
                 for flight in non_stop_flights:
-                    # Extract flight details
-                    price_str = flight.price  # Assuming flight.price is a string like '$54'
-                    price = float(price_str.replace('$', '').strip())  # Remove '$' and convert to float
-                    
+                    price_str = flight.price  # e.g. '$54'
+                    price = float(price_str.replace('$', '').strip())
+
                     # Debug: log first flight's time format to understand the structure
                     if len(itinerary) == 0:
                         log_progress(f"Sample flight time formats - departure: '{flight.departure}', arrival: '{flight.arrival}'")
-                    
-                    departure = parse_flight_time(flight.departure, travel_date)  # Parse with travel date for year
-                    arrival = parse_flight_time(flight.arrival, travel_date)  # Parse with travel date for year
 
-                    # Skip flights with invalid times
+                    departure = parse_flight_time(flight.departure, travel_date)
+                    arrival = parse_flight_time(flight.arrival, travel_date)
+
                     if not departure or not arrival:
-                        if len(itinerary) == 0:  # Only log for first flight to avoid spam
+                        if added == 0:  # only log once per route to avoid spam
                             log_progress(f"Skipping flight due to parsing failure - departure: {flight.departure}, arrival: {flight.arrival}", "WARNING")
                         continue
 
                     itinerary.append({
                         "origin": origin,
                         "destination": destination,
-                        "departure": departure,  # Store original datetime
-                        "arrival": arrival,  # Store original datetime
-                        "price": price,  # Ensure price is stored as a float
-                        "airline": flight.name  # Use the correct attribute for the airline name
+                        "departure": departure,
+                        "arrival": arrival,
+                        "price": price,
+                        "airline": flight.name
                     })
+                    added += 1
 
-                success = True  # Set success to True if flights are found
+                success = True
             except Exception as e:
                 log_progress(f"Flight Search Failed for {origin} → {destination}: {str(e)}")
                 if "no token provided" in str(e):
-                    wait_time = random.randint(1, 5)  # Random wait time between 1 and 5 seconds
+                    wait_time = random.randint(1, 5)
                     log_progress(f"Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)  # Wait before retrying
-                    attempt += 1  # Increment the attempt counter
+                    time.sleep(wait_time)
+                    attempt += 1
                 else:
-                    break  # Break the loop for other errors
+                    break
 
     # Convert to DataFrame
     log_progress(f"Total Flights Found: {len(itinerary)}")
     if zero_flight_routes:
-        log_progress(f"{len(zero_flight_routes)} route(s) returned no flights:", "WARNING")
-        for orig, dest in zero_flight_routes:
-            log_progress(f"  No flights found: {orig} → {dest}", "WARNING")
-    
+        log_progress(f"{len(zero_flight_routes)} route(s) returned NO flights from API: {', '.join(f'{o}→{d}' for o,d in zero_flight_routes)}", "WARNING")
+    if no_nonstop_routes:
+        log_progress(f"{len(no_nonstop_routes)} route(s) had only connecting flights (no non-stop): "
+                     f"{', '.join(f'{o}→{d}({n} flights)' for o,d,n in no_nonstop_routes)}", "WARNING")
+
     if not itinerary:
         log_progress("No flights found. Cannot build itineraries.", "WARNING")
         return
-    
+
     df = pd.DataFrame(itinerary)
 
     earliest_dt = pd.to_datetime(earliest_departure) if earliest_departure else None
@@ -315,7 +365,7 @@ def main():
                 if count == 0:
                     empty_routes.append(f"{orig} → {dest}")
     if empty_routes:
-        log_progress(f"Routes with NO flights after filtering (will block itineraries): {', '.join(empty_routes)}", "WARNING")
+        log_progress(f"Routes with NO usable flights (will block itineraries): {', '.join(empty_routes)}", "WARNING")
 
     # Build itinerary
     log_progress("Constructing Optimal Flight Itinerary")
@@ -359,9 +409,10 @@ def main():
                 print(f"{row['airline']:<20}{row['origin']:<10}{row['destination']:<15}{departure_human_readable:<30}{arrival_human_readable:<30}${row['price']:.2f}")
     else:
         log_progress("No valid itineraries found.", "WARNING")
-        log_progress(f"Tip: {len(airports)} cities × {min_city_time_minutes}min min stops in a "
-                     f"{(pd.to_datetime(latest_arrival) - pd.to_datetime(earliest_departure)).total_seconds()/3600:.1f}h window "
-                     f"may be too tight. Try fewer cities or reduce min_city_time_minutes.", "WARNING")
+        window_h = (pd.to_datetime(latest_arrival) - pd.to_datetime(earliest_departure)).total_seconds() / 3600
+        log_progress(f"Tip: {len(airports)} cities × {min_city_time_minutes}min min stopover in a "
+                     f"{window_h:.1f}h window may be too tight. "
+                     f"Try fewer cities, a wider time window, or a shorter min stopover.", "WARNING")
 
 
 def generate_cache_key(origin, destination, date):
