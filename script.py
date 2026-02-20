@@ -6,6 +6,8 @@ import random
 import time
 import datetime
 import hashlib
+import io
+import contextlib
 from tqdm import tqdm
 from fast_flights import FlightData, Passengers, Result, get_flights
 
@@ -27,13 +29,14 @@ def get_flights_data(origin, destination, date, max_retries=5):
             # Call the get_flights function with the required parameters
             # Note: fast-flights v2.2 supports "common", "fallback", "force-fallback"
             # "local" mode is only available in v3.0+ - v2.2 handles HTTP requests internally
-            result: Result = get_flights(
-                flight_data=flight_data,
-                trip="one-way",
-                seat="economy",
-                passengers=Passengers(adults=1, children=0, infants_in_seat=0, infants_on_lap=0),
-                fetch_mode="common",
-            )
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                result: Result = get_flights(
+                    flight_data=flight_data,
+                    trip="one-way",
+                    seat="economy",
+                    passengers=Passengers(adults=1, children=0, infants_in_seat=0, infants_on_lap=0),
+                    fetch_mode="common",
+                )
 
             # Extract flights from the result
             flights = result.flights
@@ -226,6 +229,7 @@ def main():
     # Progress tracking for flight search
     log_progress("Starting Comprehensive Flight Search")
     itinerary = []
+    zero_flight_routes = []
 
     # Use tqdm for a progress bar
     airport_combinations = [(i, j) for i in airports for j in airports if i != j]
@@ -239,6 +243,7 @@ def main():
                 flights = get_cached_flights(origin, destination, travel_date)
                 if not flights:
                     log_progress(f"No flights found for {origin} → {destination}", "WARNING")
+                    zero_flight_routes.append((origin, destination))
                     break  # Skip to the next pair if no flights are found
 
                 # Filter for non-stop flights
@@ -284,6 +289,10 @@ def main():
 
     # Convert to DataFrame
     log_progress(f"Total Flights Found: {len(itinerary)}")
+    if zero_flight_routes:
+        log_progress(f"{len(zero_flight_routes)} route(s) returned no flights:", "WARNING")
+        for orig, dest in zero_flight_routes:
+            log_progress(f"  No flights found: {orig} → {dest}", "WARNING")
     
     if not itinerary:
         log_progress("No flights found. Cannot build itineraries.", "WARNING")
