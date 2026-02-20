@@ -43,7 +43,7 @@ def get_flights_data(origin, destination, date, max_retries=5):
             log_progress(f"Flight Search Failed for {origin} → {destination}: {str(e)}", "WARNING")
             error_str = str(e).lower()
             # Handle different types of errors
-            if "no token provided" in error_str or "timeout" in error_str:
+            if "no token provided" in error_str or "timeout" in error_str or "no flights found" in error_str:
                 attempt += 1
                 if attempt < max_retries:
                     wait_time = random.randint(2, 8)  # Random wait time between 2 and 8 seconds
@@ -172,9 +172,50 @@ def build_itineraries(df, airports, min_city_time_minutes):
 
 
 
+def prompt_airports():
+    all_airports = ["NYC", "AUS", "CHI", "BNA", "CHS"]
+
+    while True:
+        try:
+            num = int(input("How many cities would you like to search? (3-5): ").strip())
+            if 3 <= num <= 5:
+                break
+            print("Please enter a number between 3 and 5.")
+        except ValueError:
+            print("Please enter a valid number.")
+
+    if num == 5:
+        print(f"Using all 5 cities: {', '.join(all_airports)}")
+        return all_airports
+
+    print(f"\nAvailable airports:")
+    for i, airport in enumerate(all_airports, start=1):
+        print(f"  {i}. {airport}")
+
+    while True:
+        try:
+            raw = input(f"Select {num} airports by number, separated by spaces (e.g. 1 3 4): ").strip()
+            parts = raw.split()
+            if len(parts) != num:
+                print(f"Please select exactly {num} airports.")
+                continue
+            indices = [int(p) - 1 for p in parts]
+            if len(set(indices)) != num:
+                print("Please select distinct airports.")
+                continue
+            if any(i < 0 or i >= len(all_airports) for i in indices):
+                print(f"Please enter numbers between 1 and {len(all_airports)}.")
+                continue
+            selected = [all_airports[i] for i in indices]
+            print(f"Selected: {', '.join(selected)}")
+            return selected
+        except ValueError:
+            print("Please enter valid numbers.")
+
+
 def main():
     # Define parameters
-    airports = ["NYC", "CHI", "BNA", "AUS"]  # Replace with your 4 airports
+    airports = prompt_airports()
     travel_date = "2026-05-10"  # Example start date
     min_city_time_minutes = 90  # Minimum time in each city
 
@@ -343,14 +384,15 @@ def get_cached_flights(origin, destination, date, max_cache_age_minutes=1):
     log_progress(f"Fetching fresh flights for {origin} → {destination}")
     flights = get_flights_data(origin, destination, date)
 
-    try:
-        with shelve.open(cache_path) as cache:
-            cache[cache_key] = {
-                'flights': flights,
-                'timestamp': time.time()
-            }
-    except Exception as e:
-        log_progress(f"Cache storage error: {str(e)}", "WARNING")
+    if flights:  # Don't cache empty results so failed routes are retried next run
+        try:
+            with shelve.open(cache_path) as cache:
+                cache[cache_key] = {
+                    'flights': flights,
+                    'timestamp': time.time()
+                }
+        except Exception as e:
+            log_progress(f"Cache storage error: {str(e)}", "WARNING")
 
     return flights
 
