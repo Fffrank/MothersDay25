@@ -290,8 +290,16 @@ def main():
                     zero_flight_routes.append((origin, destination))
                     break  # Skip to the next pair if no flights are found
 
-                # Filter for non-stop flights (stops may be "Unknown" if the text parser failed)
-                non_stop_flights = [flight for flight in flights if flight.stops == 0 or flight.stops == "Unknown"]
+                # We already request max_stops=0 from the API, so trust the result.
+                # fast_flights may return stops=None for non-stop flights (field not set),
+                # so filtering by stops==0 incorrectly drops valid direct flights.
+                # Only exclude flights that explicitly declare >0 stops.
+                def is_nonstop(f):
+                    return f.stops is None or f.stops == 0 or f.stops == "Unknown"
+                non_stop_flights = [f for f in flights if is_nonstop(f)]
+                connecting = [f for f in flights if not is_nonstop(f)]
+                if connecting:
+                    log_progress(f"Excluded {len(connecting)} connecting flights for {origin} → {destination} (stops values: {set(f.stops for f in connecting)})", "WARNING")
 
                 if not non_stop_flights:
                     log_progress(f"No non-stop flights for {origin} → {destination} ({len(flights)} with stops available)", "WARNING")
