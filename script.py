@@ -104,8 +104,9 @@ def parse_flight_time(time_str, travel_date_str):
             except ValueError:
                 pass
             
-            # If all parsing attempts fail, log and return None
-            log_progress(f"Could not parse time format: {time_str}", "WARNING")
+            # If all parsing attempts fail, log only for non-empty strings
+            if time_str:
+                log_progress(f"Could not parse time format: {repr(time_str)}", "WARNING")
             return None
     except Exception as e:
         log_progress(f"Error parsing time: {time_str} - {str(e)}", "ERROR")
@@ -320,8 +321,9 @@ def main():
                     arrival = parse_flight_time(flight.arrival, travel_date)
 
                     if not departure or not arrival:
-                        if added == 0:  # only log once per route to avoid spam
-                            log_progress(f"Skipping flight due to parsing failure - departure: {flight.departure}, arrival: {flight.arrival}", "WARNING")
+                        # Only warn if the fields were non-empty (unexpected parse failure)
+                        if flight.departure or flight.arrival:
+                            log_progress(f"Skipping flight due to parsing failure - departure: {repr(flight.departure)}, arrival: {repr(flight.arrival)}", "WARNING")
                         continue
 
                     itinerary.append({
