@@ -9,7 +9,7 @@ import hashlib
 import io
 import contextlib
 from tqdm import tqdm
-from fast_flights import FlightData, Passengers, Result, get_flights
+from fast_flights import FlightQuery, Passengers, create_query, get_flights
 
 # Verbose logging function
 def log_progress(message, level="INFO"):
@@ -21,96 +21,29 @@ def get_flights_data(origin, destination, date, max_retries=5):
     attempt = 0
     while attempt < max_retries:
         try:
-            # Create a FlightData object
-            flight_data = [
-                FlightData(date=date, from_airport=origin, to_airport=destination, max_stops=0)
-            ]
-
-            # Call the get_flights function with the required parameters
-            # Note: fast-flights v2.2 supports "common", "fallback", "force-fallback"
-            # "local" mode is only available in v3.0+ - v2.2 handles HTTP requests internally
+            query = create_query(
+                flights=[FlightQuery(date=date, from_airport=origin, to_airport=destination, max_stops=0)],
+                trip="one-way",
+                seat="economy",
+                passengers=Passengers(adults=1),
+                language="en",
+            )
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                result: Result = get_flights(
-                    flight_data=flight_data,
-                    trip="one-way",
-                    seat="economy",
-                    passengers=Passengers(adults=1, children=0, infants_in_seat=0, infants_on_lap=0),
-                    fetch_mode="fallback",
-                )
-
-            # Extract flights from the result
-            flights = result.flights
-            log_progress(f"Found {len(flights)} flights for {origin} → {destination}")
-            return flights
+                result = get_flights(query)
+            log_progress(f"Found {len(result)} flights for {origin} → {destination}")
+            return result
         except Exception as e:
             error_summary = str(e).split('\n')[0][:150]
             log_progress(f"Flight Search Failed for {origin} → {destination}: {error_summary}", "WARNING")
-            error_str = str(e).lower()
-            # Handle different types of errors
-            if "no token provided" in error_str or "timeout" in error_str or "no flights found" in error_str:
-                attempt += 1
-                if attempt < max_retries:
-                    wait_time = random.randint(2, 8)  # Random wait time between 2 and 8 seconds
-                    log_progress(f"Retrying ({attempt}/{max_retries}) in {wait_time} seconds...")
-                    time.sleep(wait_time)  # Wait before retrying
-                else:
-                    log_progress(f"Max retries reached for {origin} → {destination}. Returning no flights.", "ERROR")
-                    return []
+            attempt += 1
+            if attempt < max_retries:
+                wait_time = random.randint(2, 8)
+                log_progress(f"Retrying ({attempt}/{max_retries}) in {wait_time} seconds...")
+                time.sleep(wait_time)
             else:
-                # For other exceptions, do not retry and return an empty list
+                log_progress(f"Max retries reached for {origin} → {destination}. Returning no flights.", "ERROR")
                 return []
-
-    log_progress(f"Max retries reached for {origin} → {destination}. Returning no flights.", "ERROR")
     return []
-
-
-def parse_flight_time(time_str, travel_date_str):
-    """Parse the flight time string into a datetime object.
-    
-    Args:
-        time_str: Time string from fast_flights (e.g., "2:30 PM on Mon, May 10" or ISO format)
-        travel_date_str: Travel date string in YYYY-MM-DD format to extract the year
-    """
-    try:
-        # Check if the time string is in ISO 8601 format
-        if "T" in time_str:
-            # Parse ISO 8601 format
-            return datetime.datetime.fromisoformat(time_str)
-        else:
-            # Parse the human-readable format (e.g., "2:30 PM on Mon, May 10")
-            # Try different date formats that Google Flights might use
-            year = datetime.datetime.strptime(travel_date_str, "%Y-%m-%d").year
-            
-            # Try format with "on" (e.g., "2:30 PM on Mon, May 10")
-            try:
-                parsed_time = datetime.datetime.strptime(f"{time_str} {year}", "%I:%M %p on %a, %b %d %Y")
-                return parsed_time
-            except ValueError:
-                pass
-
-            # Try format without "on" (e.g., "2:30 PM Mon, May 10")
-            try:
-                parsed_time = datetime.datetime.strptime(f"{time_str} {year}", "%I:%M %p %a, %b %d %Y")
-                return parsed_time
-            except ValueError:
-                pass
-            
-            # Try just time (e.g., "2:30 PM") - use travel date
-            try:
-                parsed_time = datetime.datetime.strptime(time_str, "%I:%M %p")
-                travel_date = datetime.datetime.strptime(travel_date_str, "%Y-%m-%d")
-                parsed_time = parsed_time.replace(year=travel_date.year, month=travel_date.month, day=travel_date.day)
-                return parsed_time
-            except ValueError:
-                pass
-            
-            # If all parsing attempts fail, log only for non-empty strings
-            if time_str:
-                log_progress(f"Could not parse time format: {repr(time_str)}", "WARNING")
-            return None
-    except Exception as e:
-        log_progress(f"Error parsing time: {time_str} - {str(e)}", "ERROR")
-        return None
 
 def is_valid_itinerary(flight_combination, airports, min_city_time_minutes, earliest_departure=None, latest_arrival=None):
     """
@@ -274,86 +207,35 @@ def main():
     log_progress(f"Travel date: {travel_date}, window: {earliest_departure} → {latest_arrival}, min stopover: {min_city_time_minutes}m")
     itinerary = []
     zero_flight_routes = []   # API returned nothing
-    no_nonstop_routes = []    # API returned results but all had stops
 
     # Use tqdm for a progress bar
     airport_combinations = [(i, j) for i in airports for j in airports if i != j]
     for origin, destination in tqdm(airport_combinations, desc="Searching Flights"):
-        max_retries = 5  # Maximum number of retries
-        attempt = 0
-        success = False
+        flights = get_cached_flights(origin, destination, travel_date)
+        if not flights:
+            log_progress(f"No flights found for {origin} → {destination}", "WARNING")
+            zero_flight_routes.append((origin, destination))
+            continue
 
-        while attempt < max_retries and not success:
-            try:
-                flights = get_cached_flights(origin, destination, travel_date)
-                if not flights:
-                    log_progress(f"No flights found for {origin} → {destination}", "WARNING")
-                    zero_flight_routes.append((origin, destination))
-                    break  # Skip to the next pair if no flights are found
-
-                # We already request max_stops=0 from the API, so trust the result.
-                # fast_flights may return stops=None for non-stop flights (field not set),
-                # so filtering by stops==0 incorrectly drops valid direct flights.
-                # Only exclude flights that explicitly declare >0 stops.
-                def is_nonstop(f):
-                    return f.stops is None or f.stops == 0 or f.stops == "Unknown"
-                non_stop_flights = [f for f in flights if is_nonstop(f)]
-                connecting = [f for f in flights if not is_nonstop(f)]
-                if connecting:
-                    log_progress(f"Excluded {len(connecting)} connecting flights for {origin} → {destination} (stops values: {set(f.stops for f in connecting)})", "WARNING")
-
-                if not non_stop_flights:
-                    log_progress(f"No non-stop flights for {origin} → {destination} ({len(flights)} with stops available)", "WARNING")
-                    no_nonstop_routes.append((origin, destination, len(flights)))
-                    success = True
-                    break
-
-                added = 0
-                for flight in non_stop_flights:
-                    price_str = flight.price  # e.g. '$54'
-                    price = float(price_str.replace('$', '').strip())
-
-                    # Debug: log first flight's time format to understand the structure
-                    if len(itinerary) == 0:
-                        log_progress(f"Sample flight time formats - departure: '{flight.departure}', arrival: '{flight.arrival}'")
-
-                    departure = parse_flight_time(flight.departure, travel_date)
-                    arrival = parse_flight_time(flight.arrival, travel_date)
-
-                    if not departure or not arrival:
-                        # Only warn if the fields were non-empty (unexpected parse failure)
-                        if flight.departure or flight.arrival:
-                            log_progress(f"Skipping flight due to parsing failure - departure: {repr(flight.departure)}, arrival: {repr(flight.arrival)}", "WARNING")
-                        continue
-
-                    itinerary.append({
-                        "origin": origin,
-                        "destination": destination,
-                        "departure": departure,
-                        "arrival": arrival,
-                        "price": price,
-                        "airline": flight.name
-                    })
-                    added += 1
-
-                success = True
-            except Exception as e:
-                log_progress(f"Flight Search Failed for {origin} → {destination}: {str(e)}")
-                if "no token provided" in str(e):
-                    wait_time = random.randint(1, 5)
-                    log_progress(f"Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                    attempt += 1
-                else:
-                    break
+        for f in flights:
+            leg = f.flights[0]  # single non-stop leg
+            dep = leg.departure
+            arr = leg.arrival
+            departure = datetime.datetime(dep.date[0], dep.date[1], dep.date[2], dep.hour, dep.minute)
+            arrival = datetime.datetime(arr.date[0], arr.date[1], arr.date[2], arr.hour, arr.minute)
+            itinerary.append({
+                "origin": origin,
+                "destination": destination,
+                "departure": departure,
+                "arrival": arrival,
+                "price": float(f.price),
+                "airline": ", ".join(f.airlines) if f.airlines else "Unknown",
+            })
 
     # Convert to DataFrame
     log_progress(f"Total Flights Found: {len(itinerary)}")
     if zero_flight_routes:
         log_progress(f"{len(zero_flight_routes)} route(s) returned NO flights from API: {', '.join(f'{o}→{d}' for o,d in zero_flight_routes)}", "WARNING")
-    if no_nonstop_routes:
-        log_progress(f"{len(no_nonstop_routes)} route(s) had only connecting flights (no non-stop): "
-                     f"{', '.join(f'{o}→{d}({n} flights)' for o,d,n in no_nonstop_routes)}", "WARNING")
 
     if not itinerary:
         log_progress("No flights found. Cannot build itineraries.", "WARNING")
