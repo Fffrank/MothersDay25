@@ -72,7 +72,13 @@ def is_valid_itinerary(flight_combination, airports, min_city_time_minutes, earl
 
 from itertools import combinations, permutations, product
 
-def build_itineraries(df, airports, num_cities, min_city_time_minutes, earliest_departure=None, latest_arrival=None):
+def effective_price(flight, companion_pass):
+    price = float(flight['price'])
+    if companion_pass and "southwest" in flight['airline'].lower():
+        return price / 2
+    return price
+
+def build_itineraries(df, airports, num_cities, min_city_time_minutes, earliest_departure=None, latest_arrival=None, companion_pass=False):
     itineraries = []
     unique_itineraries = set()
 
@@ -94,7 +100,7 @@ def build_itineraries(df, airports, num_cities, min_city_time_minutes, earliest_
 
             if valid:
                 for flight_combination in product(*current_itinerary):
-                    total_price = sum(float(flight['price']) for flight in flight_combination)
+                    total_price = sum(effective_price(f, companion_pass) for f in flight_combination)
 
                     itinerary_id = tuple((flight['airline'], flight['origin'], flight['destination'], flight['departure'], flight['arrival']) for flight in flight_combination)
 
@@ -206,12 +212,18 @@ def prompt_constraints():
         "Minimum layover/stopover time in minutes",
         90, min_val=0
     )
-    return earliest_departure, latest_arrival, min_city_time_minutes
+    while True:
+        raw = input("Do you have a Southwest Companion Pass? (y/n): ").strip().lower()
+        if raw in ("y", "n"):
+            companion_pass = raw == "y"
+            break
+        print("  Please enter 'y' or 'n'.")
+    return earliest_departure, latest_arrival, min_city_time_minutes, companion_pass
 
 
 def main():
     airports, num_cities = prompt_airports()
-    earliest_departure, latest_arrival, min_city_time_minutes = prompt_constraints()
+    earliest_departure, latest_arrival, min_city_time_minutes, companion_pass = prompt_constraints()
     travel_date = earliest_departure[:10]  # derive date from earliest departure
 
     # Progress tracking for flight search
@@ -273,7 +285,9 @@ def main():
 
     # Build itinerary
     log_progress("Constructing Optimal Flight Itinerary")
-    final_itineraries = build_itineraries(df, airports, num_cities, min_city_time_minutes, earliest_dt, latest_dt)
+    if companion_pass:
+        log_progress("Companion Pass active: Southwest prices halved in calculations")
+    final_itineraries = build_itineraries(df, airports, num_cities, min_city_time_minutes, earliest_dt, latest_dt, companion_pass)
 
     # Display results
     log_progress("Final Itinerary Construction Complete")
@@ -281,36 +295,31 @@ def main():
         final_itineraries = sorted(final_itineraries, key=lambda x: x["total_price"])
         least_expensive = final_itineraries[0]
 
-        # Pretty print the least expensive itinerary
-        print("\n==== LEAST EXPENSIVE ITINERARY ====")
-        itinerary_df = pd.DataFrame(least_expensive["flights"])
+        cp_note = "  * Southwest prices halved (Companion Pass)" if companion_pass else ""
 
-        # Print header
+        def print_itinerary_rows(flights_df):
+            for _, row in flights_df.iterrows():
+                dep = row['departure'].strftime("%B %d, %Y, %I:%M %p")
+                arr = row['arrival'].strftime("%B %d, %Y, %I:%M %p")
+                price = effective_price(row, companion_pass)
+                cp_tag = " (CP)" if companion_pass and "southwest" in row['airline'].lower() else ""
+                print(f"{row['airline']:<20}{row['origin']:<10}{row['destination']:<15}{dep:<30}{arr:<30}${price:.2f}{cp_tag}")
+
+        # Pretty print the least expensive itinerary
+        print(f"\n==== LEAST EXPENSIVE ITINERARY ===={cp_note}")
+        itinerary_df = pd.DataFrame(least_expensive["flights"])
         print(f"{'Airline':<20}{'Origin':<10}{'Destination':<15}{'Departure':<30}{'Arrival':<30}{'Price':<10}")
         print("=" * 100)
-
-        for index, row in itinerary_df.iterrows():
-            # Format departure and arrival for display
-            departure_human_readable = row['departure'].strftime("%B %d, %Y, %I:%M %p")
-            arrival_human_readable = row['arrival'].strftime("%B %d, %Y, %I:%M %p")
-            print(f"{row['airline']:<20}{row['origin']:<10}{row['destination']:<15}{departure_human_readable:<30}{arrival_human_readable:<30}${row['price']:.2f}")
-
+        print_itinerary_rows(itinerary_df)
         print(f"\nTotal Price: ${least_expensive['total_price']:.2f}")
 
         print("\n==== TOP 10 ITINERARIES ====")
         for idx, itinerary in enumerate(final_itineraries[:10], start=1):
             print(f"\nOption {idx}: Total Price = ${itinerary['total_price']:.2f}")
             itinerary_df = pd.DataFrame(itinerary["flights"])
-
-            # Print header
             print(f"{'Airline':<20}{'Origin':<10}{'Destination':<15}{'Departure':<30}{'Arrival':<30}{'Price':<10}")
             print("=" * 100)
-
-            for index, row in itinerary_df.iterrows():
-                # Format departure and arrival for display
-                departure_human_readable = row['departure'].strftime("%B %d, %Y, %I:%M %p")
-                arrival_human_readable = row['arrival'].strftime("%B %d, %Y, %I:%M %p")
-                print(f"{row['airline']:<20}{row['origin']:<10}{row['destination']:<15}{departure_human_readable:<30}{arrival_human_readable:<30}${row['price']:.2f}")
+            print_itinerary_rows(itinerary_df)
     else:
         log_progress("No valid itineraries found.", "WARNING")
         window_h = (pd.to_datetime(latest_arrival) - pd.to_datetime(earliest_departure)).total_seconds() / 3600
