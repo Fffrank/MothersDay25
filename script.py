@@ -78,11 +78,13 @@ def effective_price(flight, companion_pass):
         return price / 2
     return price
 
-def build_itineraries(df, airports, num_cities, min_city_time_minutes, earliest_departure=None, latest_arrival=None, companion_pass=False):
+def build_itineraries(df, airports, num_cities, min_city_time_minutes, earliest_departure=None, latest_arrival=None, companion_pass=False, require_chs=False):
     itineraries = []
     unique_itineraries = set()
 
     for combo in combinations(airports, num_cities):
+        if require_chs and "CHS" not in combo:
+            continue
         for perm in permutations(combo):
             current_itinerary = []
             valid = True
@@ -218,12 +220,18 @@ def prompt_constraints():
             companion_pass = raw == "y"
             break
         print("  Please enter 'y' or 'n'.")
-    return earliest_departure, latest_arrival, min_city_time_minutes, companion_pass
+    while True:
+        raw = input("Is CHS a required city? (y/n): ").strip().lower()
+        if raw in ("y", "n"):
+            require_chs = raw == "y"
+            break
+        print("  Please enter 'y' or 'n'.")
+    return earliest_departure, latest_arrival, min_city_time_minutes, companion_pass, require_chs
 
 
 def main():
     airports, num_cities = prompt_airports()
-    earliest_departure, latest_arrival, min_city_time_minutes, companion_pass = prompt_constraints()
+    earliest_departure, latest_arrival, min_city_time_minutes, companion_pass, require_chs = prompt_constraints()
     travel_date = earliest_departure[:10]  # derive date from earliest departure
 
     # Progress tracking for flight search
@@ -287,7 +295,7 @@ def main():
     log_progress("Constructing Optimal Flight Itinerary")
     if companion_pass:
         log_progress("Companion Pass active: Southwest prices halved in calculations")
-    final_itineraries = build_itineraries(df, airports, num_cities, min_city_time_minutes, earliest_dt, latest_dt, companion_pass)
+    final_itineraries = build_itineraries(df, airports, num_cities, min_city_time_minutes, earliest_dt, latest_dt, companion_pass, require_chs)
 
     # Display results
     log_progress("Final Itinerary Construction Complete")
