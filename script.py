@@ -70,40 +70,41 @@ def is_valid_itinerary(flight_combination, airports, min_city_time_minutes, earl
     return True
 
 
-from itertools import permutations, product
+from itertools import combinations, permutations, product
 
-def build_itineraries(df, airports, min_city_time_minutes, earliest_departure=None, latest_arrival=None):
+def build_itineraries(df, airports, num_cities, min_city_time_minutes, earliest_departure=None, latest_arrival=None):
     itineraries = []
     unique_itineraries = set()
 
-    for perm in permutations(airports):
-        current_itinerary = []
-        valid = True
+    for combo in combinations(airports, num_cities):
+        for perm in permutations(combo):
+            current_itinerary = []
+            valid = True
 
-        for i in range(len(perm) - 1):
-            origin = perm[i]
-            destination = perm[i + 1]
-            possible_flights = df[(df['origin'] == origin) & (df['destination'] == destination)]
+            for i in range(len(perm) - 1):
+                origin = perm[i]
+                destination = perm[i + 1]
+                possible_flights = df[(df['origin'] == origin) & (df['destination'] == destination)]
 
-            if not possible_flights.empty:
-                current_itinerary.append(possible_flights.to_dict('records'))
-            else:
-                valid = False
-                break
+                if not possible_flights.empty:
+                    current_itinerary.append(possible_flights.to_dict('records'))
+                else:
+                    valid = False
+                    break
 
-        if valid:
-            for flight_combination in product(*current_itinerary):
-                total_price = sum(float(flight['price']) for flight in flight_combination)
+            if valid:
+                for flight_combination in product(*current_itinerary):
+                    total_price = sum(float(flight['price']) for flight in flight_combination)
 
-                itinerary_id = tuple((flight['airline'], flight['origin'], flight['destination'], flight['departure'], flight['arrival']) for flight in flight_combination)
+                    itinerary_id = tuple((flight['airline'], flight['origin'], flight['destination'], flight['departure'], flight['arrival']) for flight in flight_combination)
 
-                if itinerary_id not in unique_itineraries:
-                    unique_itineraries.add(itinerary_id)
-                    if is_valid_itinerary(flight_combination, airports, min_city_time_minutes, earliest_departure, latest_arrival):
-                        itineraries.append({
-                            "flights": flight_combination,
-                            "total_price": total_price
-                        })
+                    if itinerary_id not in unique_itineraries:
+                        unique_itineraries.add(itinerary_id)
+                        if is_valid_itinerary(flight_combination, airports, min_city_time_minutes, earliest_departure, latest_arrival):
+                            itineraries.append({
+                                "flights": flight_combination,
+                                "total_price": total_price
+                            })
 
     log_progress(f"Found {len(itineraries)} valid itineraries")
     return itineraries
@@ -124,7 +125,18 @@ def prompt_airports():
 
     if num == 5:
         print(f"Using all 5 cities: {', '.join(all_airports)}")
-        return all_airports
+        return all_airports, 5
+
+    # For 3 or 4 cities, ask whether to find the best N from all cities or pick specific ones
+    while True:
+        choice = input(f"Find best {num} from all cities, or pick specific ones? (any/pick): ").strip().lower()
+        if choice in ("any", "pick"):
+            break
+        print("  Please enter 'any' or 'pick'.")
+
+    if choice == "any":
+        print(f"Will search all cities and find the best {num}-city itinerary.")
+        return all_airports, num
 
     print(f"\nAvailable airports:")
     for i, airport in enumerate(all_airports, start=1):
@@ -146,7 +158,7 @@ def prompt_airports():
                 continue
             selected = [all_airports[i] for i in indices]
             print(f"Selected: {', '.join(selected)}")
-            return selected
+            return selected, num
         except ValueError:
             print("Please enter valid numbers.")
 
@@ -198,7 +210,7 @@ def prompt_constraints():
 
 
 def main():
-    airports = prompt_airports()
+    airports, num_cities = prompt_airports()
     earliest_departure, latest_arrival, min_city_time_minutes = prompt_constraints()
     travel_date = earliest_departure[:10]  # derive date from earliest departure
 
@@ -261,7 +273,7 @@ def main():
 
     # Build itinerary
     log_progress("Constructing Optimal Flight Itinerary")
-    final_itineraries = build_itineraries(df, airports, min_city_time_minutes, earliest_dt, latest_dt)
+    final_itineraries = build_itineraries(df, airports, num_cities, min_city_time_minutes, earliest_dt, latest_dt)
 
     # Display results
     log_progress("Final Itinerary Construction Complete")
@@ -302,7 +314,7 @@ def main():
     else:
         log_progress("No valid itineraries found.", "WARNING")
         window_h = (pd.to_datetime(latest_arrival) - pd.to_datetime(earliest_departure)).total_seconds() / 3600
-        log_progress(f"Tip: {len(airports)} cities × {min_city_time_minutes}min min stopover in a "
+        log_progress(f"Tip: {num_cities} cities × {min_city_time_minutes}min min stopover in a "
                      f"{window_h:.1f}h window may be too tight. "
                      f"Try fewer cities, a wider time window, or a shorter min stopover.", "WARNING")
 
