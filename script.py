@@ -45,11 +45,12 @@ def get_flights_data(origin, destination, date, max_retries=5):
                 return []
     return []
 
-def is_valid_itinerary(flight_combination, airports, min_city_time_minutes, earliest_departure=None, latest_arrival=None):
+def is_valid_itinerary(flight_combination, airports, min_city_time_minutes, min_nyc_time_minutes=None, earliest_departure=None, latest_arrival=None):
     """
     Validate if a given flight combination is a valid itinerary.
     earliest_departure applies only to the first flight's departure.
     latest_arrival applies only to the last flight's arrival.
+    NYC layovers use min_nyc_time_minutes when provided.
     """
     if earliest_departure and flight_combination[0]['departure'] < earliest_departure:
         return False
@@ -64,7 +65,12 @@ def is_valid_itinerary(flight_combination, airports, min_city_time_minutes, earl
         next_departure = next_flight['departure']
 
         layover_time = (next_departure - current_arrival).total_seconds() / 60
-        if layover_time < min_city_time_minutes:
+        min_time = (
+            min_nyc_time_minutes
+            if min_nyc_time_minutes and current_flight['destination'] == 'NYC'
+            else min_city_time_minutes
+        )
+        if layover_time < min_time:
             return False
 
     return True
@@ -78,7 +84,7 @@ def effective_price(flight, companion_pass):
         return price / 2
     return price
 
-def build_itineraries(df, airports, num_cities, min_city_time_minutes, earliest_departure=None, latest_arrival=None, companion_pass=False, require_chs=False):
+def build_itineraries(df, airports, num_cities, min_city_time_minutes, min_nyc_time_minutes=None, earliest_departure=None, latest_arrival=None, companion_pass=False, require_chs=False):
     itineraries = []
     unique_itineraries = set()
 
@@ -108,7 +114,7 @@ def build_itineraries(df, airports, num_cities, min_city_time_minutes, earliest_
 
                     if itinerary_id not in unique_itineraries:
                         unique_itineraries.add(itinerary_id)
-                        if is_valid_itinerary(flight_combination, airports, min_city_time_minutes, earliest_departure, latest_arrival):
+                        if is_valid_itinerary(flight_combination, airports, min_city_time_minutes, min_nyc_time_minutes, earliest_departure, latest_arrival):
                             itineraries.append({
                                 "flights": flight_combination,
                                 "total_price": total_price
@@ -171,17 +177,17 @@ def prompt_airports():
             print("Please enter valid numbers.")
 
 
-def prompt_datetime(label, default_str):
-    """Prompt for a datetime, showing the default. Returns a datetime string in ISO format."""
+def prompt_time(label, default_time, date_str):
+    """Prompt for HH:MM, combining with date_str to return a full ISO datetime string."""
     while True:
-        raw = input(f"{label} [{default_str}]: ").strip()
+        raw = input(f"{label} [{default_time}]: ").strip()
         if not raw:
-            return default_str
+            raw = default_time
         try:
-            datetime.datetime.fromisoformat(raw)
-            return raw
+            datetime.datetime.strptime(raw, "%H:%M")
+            return f"{date_str}T{raw}:00"
         except ValueError:
-            print("  Invalid format. Use YYYY-MM-DDTHH:MM:SS (e.g. 2026-05-10T08:00:00)")
+            print("  Invalid format. Use HH:MM (e.g. 08:30)")
 
 
 def prompt_int(label, default, min_val=1):
@@ -202,17 +208,21 @@ def prompt_int(label, default, min_val=1):
 def prompt_constraints():
     print("\n-- Flight Constraints --")
     print("Press Enter to accept defaults.\n")
-    earliest_departure = prompt_datetime(
-        "Earliest departure time for first flight (YYYY-MM-DDTHH:MM:SS)",
-        "2026-05-10T10:50:00"
+    earliest_departure = prompt_time(
+        "Earliest departure time on May 10 (HH:MM)",
+        "10:50", "2026-05-10"
     )
-    latest_arrival = prompt_datetime(
-        "Latest arrival time for last flight   (YYYY-MM-DDTHH:MM:SS)",
-        "2026-05-11T00:45:00"
+    latest_arrival = prompt_time(
+        "Latest arrival time on May 11   (HH:MM)",
+        "00:45", "2026-05-11"
     )
     min_city_time_minutes = prompt_int(
-        "Minimum layover/stopover time in minutes",
+        "Minimum stopover time in all cities (minutes)",
         90, min_val=0
+    )
+    min_nyc_time_minutes = prompt_int(
+        "Minimum stopover time in NYC (minutes)",
+        180, min_val=0
     )
     while True:
         raw = input("Do you have a Southwest Companion Pass? (y/n): ").strip().lower()
@@ -226,17 +236,17 @@ def prompt_constraints():
             require_chs = raw == "y"
             break
         print("  Please enter 'y' or 'n'.")
-    return earliest_departure, latest_arrival, min_city_time_minutes, companion_pass, require_chs
+    return earliest_departure, latest_arrival, min_city_time_minutes, min_nyc_time_minutes, companion_pass, require_chs
 
 
 def main():
     airports, num_cities = prompt_airports()
-    earliest_departure, latest_arrival, min_city_time_minutes, companion_pass, require_chs = prompt_constraints()
+    earliest_departure, latest_arrival, min_city_time_minutes, min_nyc_time_minutes, companion_pass, require_chs = prompt_constraints()
     travel_date = earliest_departure[:10]  # derive date from earliest departure
 
     # Progress tracking for flight search
     log_progress("Starting Comprehensive Flight Search")
-    log_progress(f"Travel date: {travel_date}, window: {earliest_departure} → {latest_arrival}, min stopover: {min_city_time_minutes}m")
+    log_progress(f"Travel date: {travel_date}, window: {earliest_departure} → {latest_arrival}, min stopover: {min_city_time_minutes}m (NYC: {min_nyc_time_minutes}m)")
     itinerary = []
     zero_flight_routes = []   # API returned nothing
 
@@ -295,7 +305,7 @@ def main():
     log_progress("Constructing Optimal Flight Itinerary")
     if companion_pass:
         log_progress("Companion Pass active: Southwest prices halved in calculations")
-    final_itineraries = build_itineraries(df, airports, num_cities, min_city_time_minutes, earliest_dt, latest_dt, companion_pass, require_chs)
+    final_itineraries = build_itineraries(df, airports, num_cities, min_city_time_minutes, min_nyc_time_minutes, earliest_dt, latest_dt, companion_pass, require_chs)
 
     # Display results
     log_progress("Final Itinerary Construction Complete")
