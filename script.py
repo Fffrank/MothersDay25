@@ -268,6 +268,8 @@ def main():
             itinerary.append({
                 "origin": origin,
                 "destination": destination,
+                "display_origin": leg.from_airport.code,
+                "display_destination": leg.to_airport.code,
                 "departure": departure,
                 "arrival": arrival,
                 "price": float(f.price),
@@ -321,7 +323,7 @@ def main():
                 arr = row['arrival'].strftime("%B %d, %Y, %I:%M %p")
                 price = effective_price(row, companion_pass)
                 cp_tag = " (CP)" if companion_pass and "southwest" in row['airline'].lower() else ""
-                print(f"{row['airline']:<20}{row['origin']:<10}{row['destination']:<15}{dep:<30}{arr:<30}${price:.2f}{cp_tag}")
+                print(f"{row['airline']:<20}{row['display_origin']:<10}{row['display_destination']:<15}{dep:<30}{arr:<30}${price:.2f}{cp_tag}")
 
         # Pretty print the least expensive itinerary
         print(f"\n==== LEAST EXPENSIVE ITINERARY ===={cp_note}")
