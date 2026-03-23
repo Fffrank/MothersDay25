@@ -11,6 +11,15 @@ import contextlib
 from tqdm import tqdm
 from fast_flights import FlightQuery, Passengers, create_query, get_flights
 
+CACHE_VERSION = "v2_stops1"
+
+# Maps display airport codes (from API) back to search codes used in this script
+DISPLAY_TO_SEARCH_CODE = {
+    'JFK': 'NYC', 'LGA': 'NYC', 'EWR': 'NYC',   # New York area
+    'ORD': 'CHI', 'MDW': 'CHI',                   # Chicago area
+    'AUS': 'AUS', 'BNA': 'BNA', 'CHS': 'CHS',    # Single-airport cities
+}
+
 # Verbose logging function
 def log_progress(message, level="INFO"):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -22,7 +31,7 @@ def get_flights_data(origin, destination, date, max_retries=5):
     while attempt < max_retries:
         try:
             query = create_query(
-                flights=[FlightQuery(date=date, from_airport=origin, to_airport=destination, max_stops=0)],
+                flights=[FlightQuery(date=date, from_airport=origin, to_airport=destination, max_stops=1)],
                 trip="one-way",
                 seat="economy",
                 passengers=Passengers(adults=1),
@@ -51,25 +60,82 @@ def is_valid_itinerary(flight_combination, airports, min_city_times, earliest_de
     earliest_departure applies only to the first flight's departure.
     latest_arrival applies only to the last flight's arrival.
     min_city_times is a dict mapping airport code -> minimum stopover minutes.
+    Through flights store intermediate stop times in 'leg_times' and are checked too.
     """
     if earliest_departure and flight_combination[0]['departure'] < earliest_departure:
         return False
     if latest_arrival and flight_combination[-1]['arrival'] > latest_arrival:
         return False
 
-    for i in range(len(flight_combination) - 1):
-        current_flight = flight_combination[i]
-        next_flight = flight_combination[i + 1]
+    for i, flight in enumerate(flight_combination):
+        # Check stopover time at each intermediate city within a through flight
+        for stop_code, times in flight.get('leg_times', {}).items():
+            stopover_min = (times['departure'] - times['arrival']).total_seconds() / 60
+            min_time = min_city_times.get(stop_code, 90)
+            if stopover_min < min_time:
+                return False
 
-        layover_time = (next_flight['departure'] - current_flight['arrival']).total_seconds() / 60
-        min_time = min_city_times.get(current_flight['destination'], 90)
-        if layover_time < min_time:
-            return False
+        # Check layover between this flight and the next
+        if i < len(flight_combination) - 1:
+            next_flight = flight_combination[i + 1]
+            layover_time = (next_flight['departure'] - flight['arrival']).total_seconds() / 60
+            min_time = min_city_times.get(flight['destination'], 90)
+            if layover_time < min_time:
+                return False
 
     return True
 
 
 from itertools import combinations, permutations, product
+
+def _via_stops_match(via_stops, required_via):
+    """
+    Check that every city in required_via appears in via_stops in the same relative order.
+    E.g. required_via=['BNA'] matches via_stops=['BNA'] or ['BNA','ORD'] but not ['ORD'].
+    """
+    req_idx = 0
+    for stop in via_stops:
+        if req_idx < len(required_via) and stop == required_via[req_idx]:
+            req_idx += 1
+    return req_idx == len(required_via)
+
+
+def _find_flight_sequences(perm, df, start_idx):
+    """
+    Recursively find all ways to cover perm[start_idx:] using flights from df.
+    A single through flight (with via_stops) can cover multiple consecutive cities,
+    eliminating the need for separate flights between each pair.
+    Returns a list of flight-record-lists.
+    """
+    if start_idx >= len(perm) - 1:
+        return [[]]
+
+    result = []
+    for end_idx in range(start_idx + 1, len(perm)):
+        origin = perm[start_idx]
+        dest = perm[end_idx]
+        required_via = list(perm[start_idx + 1:end_idx])
+
+        if not required_via:
+            # Simple leg: look for any flight from origin to dest
+            possible = df[(df['origin'] == origin) & (df['destination'] == dest)]
+        else:
+            # Through flight: must pass through all required intermediate cities in order
+            possible = df[
+                (df['origin'] == origin) &
+                (df['destination'] == dest) &
+                df['via_stops'].apply(lambda vs: _via_stops_match(vs, required_via))
+            ]
+
+        if not possible.empty:
+            flights = possible.to_dict('records')
+            rest_seqs = _find_flight_sequences(perm, df, end_idx)
+            for flight in flights:
+                for rest in rest_seqs:
+                    result.append([flight] + rest)
+
+    return result
+
 
 def effective_price(flight, companion_pass):
     price = float(flight['price'])
@@ -85,33 +151,25 @@ def build_itineraries(df, airports, num_cities, min_city_times, earliest_departu
         if require_chs and "CHS" not in combo:
             continue
         for perm in permutations(combo):
-            current_itinerary = []
-            valid = True
+            # Find all ways to cover this permutation, including through flights
+            # that skip over intermediate cities via their stopover airports
+            all_sequences = _find_flight_sequences(perm, df, 0)
 
-            for i in range(len(perm) - 1):
-                origin = perm[i]
-                destination = perm[i + 1]
-                possible_flights = df[(df['origin'] == origin) & (df['destination'] == destination)]
+            for flight_combination in all_sequences:
+                total_price = sum(effective_price(f, companion_pass) for f in flight_combination)
 
-                if not possible_flights.empty:
-                    current_itinerary.append(possible_flights.to_dict('records'))
-                else:
-                    valid = False
-                    break
+                itinerary_id = tuple(
+                    (f['airline'], f['origin'], f['destination'], f['departure'], f['arrival'])
+                    for f in flight_combination
+                )
 
-            if valid:
-                for flight_combination in product(*current_itinerary):
-                    total_price = sum(effective_price(f, companion_pass) for f in flight_combination)
-
-                    itinerary_id = tuple((flight['airline'], flight['origin'], flight['destination'], flight['departure'], flight['arrival']) for flight in flight_combination)
-
-                    if itinerary_id not in unique_itineraries:
-                        unique_itineraries.add(itinerary_id)
-                        if is_valid_itinerary(flight_combination, airports, min_city_times, earliest_departure, latest_arrival):
-                            itineraries.append({
-                                "flights": flight_combination,
-                                "total_price": total_price
-                            })
+                if itinerary_id not in unique_itineraries:
+                    unique_itineraries.add(itinerary_id)
+                    if is_valid_itinerary(flight_combination, airports, min_city_times, earliest_departure, latest_arrival):
+                        itineraries.append({
+                            "flights": flight_combination,
+                            "total_price": total_price
+                        })
 
     log_progress(f"Found {len(itineraries)} valid itineraries")
     return itineraries
@@ -253,20 +311,43 @@ def main():
             continue
 
         for f in flights:
-            leg = f.flights[0]  # single non-stop leg
-            dep = leg.departure
-            arr = leg.arrival
+            if not f.flights:
+                continue
+            first_leg = f.flights[0]
+            last_leg = f.flights[-1]
+            dep = first_leg.departure
+            arr = last_leg.arrival
             departure = datetime.datetime(dep.date[0], dep.date[1], dep.date[2], dep.hour, dep.minute)
             arrival = datetime.datetime(arr.date[0], arr.date[1], arr.date[2], arr.hour, arr.minute)
+
+            # Identify intermediate stops that are target airports (search codes)
+            via_stops = []
+            leg_times = {}
+            for k in range(1, len(f.flights)):
+                inter_display = f.flights[k].from_airport.code
+                search_code = DISPLAY_TO_SEARCH_CODE.get(inter_display, inter_display)
+                if search_code in airports:
+                    arr_obj = f.flights[k - 1].arrival
+                    dep_obj = f.flights[k].departure
+                    arr_inter = datetime.datetime(arr_obj.date[0], arr_obj.date[1], arr_obj.date[2], arr_obj.hour, arr_obj.minute)
+                    dep_inter = datetime.datetime(dep_obj.date[0], dep_obj.date[1], dep_obj.date[2], dep_obj.hour, dep_obj.minute)
+                    via_stops.append(search_code)
+                    leg_times[search_code] = {'arrival': arr_inter, 'departure': dep_inter}
+
+            if via_stops:
+                log_progress(f"Through flight {origin}→{destination} covers via {via_stops}")
+
             itinerary.append({
                 "origin": origin,
                 "destination": destination,
-                "display_origin": leg.from_airport.code,
-                "display_destination": leg.to_airport.code,
+                "display_origin": first_leg.from_airport.code,
+                "display_destination": last_leg.to_airport.code,
                 "departure": departure,
                 "arrival": arrival,
                 "price": float(f.price),
                 "airline": ", ".join(f.airlines) if f.airlines else "Unknown",
+                "via_stops": via_stops,
+                "leg_times": leg_times,
             })
 
     # Convert to DataFrame
@@ -316,7 +397,9 @@ def main():
                 arr = row['arrival'].strftime("%B %d, %Y, %I:%M %p")
                 price = effective_price(row, companion_pass)
                 cp_tag = " (CP)" if companion_pass and "southwest" in row['airline'].lower() else ""
-                print(f"{row['airline']:<20}{row['display_origin']:<10}{row['display_destination']:<15}{dep:<30}{arr:<30}${price:.2f}{cp_tag}")
+                via_stops = row['via_stops'] if 'via_stops' in row.index else []
+                via_tag = f" (via {','.join(via_stops)})" if via_stops else ""
+                print(f"{row['airline']:<20}{row['display_origin']:<10}{row['display_destination']:<15}{dep:<30}{arr:<30}${price:.2f}{cp_tag}{via_tag}")
 
         # Pretty print the least expensive itinerary
         print(f"\n==== LEAST EXPENSIVE ITINERARY ===={cp_note}")
@@ -342,7 +425,7 @@ def main():
 
 
 def generate_cache_key(origin, destination, date):
-    key_string = f"{origin}_{destination}_{date}"
+    key_string = f"{CACHE_VERSION}_{origin}_{destination}_{date}"
     return hashlib.md5(key_string.encode()).hexdigest()
 
 def get_cached_flights(origin, destination, date, max_cache_age_minutes=1):
