@@ -13,6 +13,17 @@ from fast_flights import FlightQuery, Passengers, create_query, get_flights
 
 CACHE_VERSION = "v3_stops1"
 
+def _dt(sdt):
+    """Convert a fast-flights SimpleDatetime to a Python datetime.
+    Treats None/missing time components as 0 rather than discarding the flight —
+    the parser occasionally returns None for midnight hours or missing minutes."""
+    try:
+        h = (sdt.time[0] or 0) if sdt.time else 0
+        m = (sdt.time[1] or 0) if len(sdt.time) > 1 else 0
+        return datetime.datetime(sdt.date[0], sdt.date[1], sdt.date[2], h, m)
+    except Exception:
+        return None
+
 # Maps display airport codes (from API) back to search codes used in this script
 DISPLAY_TO_SEARCH_CODE = {
     'JFK': 'NYC', 'LGA': 'NYC', 'EWR': 'NYC',   # New York area
@@ -315,10 +326,11 @@ def main():
             first_leg = f.flights[0]
             last_leg = f.flights[-1]
 
-            dep = first_leg.departure
-            arr = last_leg.arrival
-            departure = datetime.datetime(dep.date[0], dep.date[1], dep.date[2], dep.time[0], dep.time[1])
-            arrival = datetime.datetime(arr.date[0], arr.date[1], arr.date[2], arr.time[0], arr.time[1])
+            departure = _dt(first_leg.departure)
+            arrival = _dt(last_leg.arrival)
+            if departure is None or arrival is None:
+                log_progress(f"Skipping {origin}→{destination} flight with unrecoverable timestamp", "WARNING")
+                continue
 
             # Identify intermediate stops that are target airports (using search codes)
             via_stops = []
@@ -327,10 +339,8 @@ def main():
                 inter_display = f.flights[k].from_airport.code
                 search_code = DISPLAY_TO_SEARCH_CODE.get(inter_display, inter_display)
                 if search_code in airports:
-                    arr_obj = f.flights[k - 1].arrival
-                    dep_obj = f.flights[k].departure
-                    arr_inter = datetime.datetime(arr_obj.date[0], arr_obj.date[1], arr_obj.date[2], arr_obj.time[0], arr_obj.time[1])
-                    dep_inter = datetime.datetime(dep_obj.date[0], dep_obj.date[1], dep_obj.date[2], dep_obj.time[0], dep_obj.time[1])
+                    arr_inter = _dt(f.flights[k - 1].arrival)
+                    dep_inter = _dt(f.flights[k].departure)
                     via_stops.append(search_code)
                     leg_times[search_code] = {'arrival': arr_inter, 'departure': dep_inter}
 
